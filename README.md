@@ -1,36 +1,160 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Docs Comparator Next
 
-## Getting Started
+Application web de comparaison de documents PDF qui analyse les différences entre deux fichiers PDF et génère des rapports de comparaison en plusieurs formats.
 
-First, run the development server:
+## Fonctionnalités
+
+- Upload et comparaison de deux documents PDF
+- Extraction de texte avec support OCR (Google Cloud Vision)
+- Prévisualisation PDF avec navigation par page
+- Trois formats de sortie :
+  - **HTML** : Vue côte à côte avec défilement synchronisé (recommandé)
+  - **PDF Différences** : Liste textuelle des modifications
+  - **PDF Annoté** : PDF original avec surlignages colorés
+- Surlignage des différences :
+  - Rouge : texte supprimé
+  - Vert : texte ajouté
+  - Jaune : texte modifié
+
+## Technologies
+
+**Frontend :**
+- Next.js 15.5.4 / React 19 / TypeScript
+- Tailwind CSS
+- PDF.js (rendu et extraction)
+- PDF-lib (manipulation PDF)
+
+**Backend (optionnel) :**
+- FastAPI (Python)
+- PyMuPDF
+- Google Cloud Vision (OCR)
+
+## Installation
+
+### 1. Frontend (Next.js)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Installer les dépendances
+npm install
+
+# Copier le worker PDF.js
+npm run copy-assets
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Backend Python (optionnel - pour OCR avancé)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd python-backend
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+# Créer l'environnement virtuel
+python -m venv venv
 
-## Learn More
+# Activer l'environnement
+# Windows :
+venv\Scripts\activate
+# macOS/Linux :
+source venv/bin/activate
 
-To learn more about Next.js, take a look at the following resources:
+# Installer les dépendances
+pip install -r requirements.txt
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 3. Configuration
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Créer un fichier `.env` à la racine :
 
-## Deploy on Vercel
+```env
+GOOGLE_APPLICATION_CREDENTIALS=<chemin-vers-credentials-google-cloud>
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+> **Note :** Le backend est optionnel. L'application fonctionne en mode client-side sans API, mais sans capacité OCR.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Lancement
+
+### Développement
+
+**Terminal 1 - Frontend :**
+```bash
+npm run dev
+# Accessible sur http://localhost:3000
+```
+
+**Terminal 2 - Backend (optionnel) :**
+```bash
+cd python-backend
+# Activer venv
+python main.py
+# Accessible sur http://localhost:8000
+```
+
+### Production
+
+```bash
+npm run build
+npm start
+```
+
+## Structure du projet
+
+```
+docs-comparator-next/
+├── app/
+│   ├── layout.tsx          # Layout principal
+│   ├── page.tsx            # Page d'accueil
+│   └── globals.css         # Styles globaux
+├── components/
+│   ├── DiffProcessor.tsx   # Logique de comparaison
+│   ├── PdfUploader.tsx     # Upload de fichiers
+│   └── PdfPreview.tsx      # Prévisualisation PDF
+├── python-backend/
+│   ├── main.py             # API FastAPI
+│   ├── hybrid_extractor.py # Extraction hybride texte/OCR
+│   └── requirements.txt    # Dépendances Python
+├── public/                 # Assets statiques
+└── package.json
+```
+
+## API Backend
+
+| Endpoint | Méthode | Description |
+|----------|---------|-------------|
+| `/` | GET | Info API |
+| `/api/extract` | POST | Extraire texte d'un PDF |
+| `/api/compare` | POST | Comparer deux PDFs |
+| `/health` | GET | Health check |
+
+### Exemple - Comparer deux PDFs
+
+```bash
+curl -X POST http://localhost:8000/api/compare \
+  -F "file1=@document1.pdf" \
+  -F "file2=@document2.pdf"
+```
+
+## Utilisation
+
+1. Glisser-déposer ou sélectionner deux fichiers PDF (max 10 Mo chacun)
+2. Vérifier les prévisualisations
+3. Cliquer sur "Comparer les PDF"
+4. Télécharger les résultats dans le format souhaité
+
+## Scripts npm
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Serveur de développement (Turbopack) |
+| `npm run build` | Build de production |
+| `npm start` | Serveur de production |
+| `npm run lint` | Linter ESLint |
+| `npm run copy-assets` | Copie le worker PDF.js |
+
+## Limitations
+
+- Format accepté : PDF uniquement
+- Taille max par fichier : 10 Mo
+- OCR nécessite le backend Python + credentials Google Cloud Vision
+
+## Licence
+
+Projet privé

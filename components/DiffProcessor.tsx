@@ -2,13 +2,19 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
-import { pdfjs } from "react-pdf";
+import * as pdfjs from "pdfjs-dist";
 import * as diff from "diff";
-import { Download, Loader2, AlertCircle } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  AlertCircle,
+  CheckCircle,
+  FileText,
+} from "lucide-react";
 
-// Configure PDF.js worker for Next.js with Turbopack
+// Configure PDF.js worker
 if (typeof window !== "undefined") {
-  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js";
+  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 }
 
 interface UploadedFile {
@@ -24,6 +30,29 @@ interface DiffProcessorProps {
   onError?: (message: string) => void;
 }
 
+interface ExtractionResult {
+  filename: string;
+  text: string;
+  pages: any[];
+  stats: {
+    total_pages: number;
+    text_extracted: number;
+    ocr_used: number;
+    hybrid: number;
+    empty: number;
+  };
+}
+
+interface DiffLine {
+  lineNumber1: number;
+  lineNumber2: number;
+  text1: string;
+  text2: string;
+  type: "unchanged" | "modified" | "added" | "removed";
+}
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 const DiffProcessor: React.FC<DiffProcessorProps> = ({
   file1,
   file2,
@@ -34,8 +63,65 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
   const [diffPdfUrl, setDiffPdfUrl] = useState<string | null>(null);
   const [annotatedPdfUrl, setAnnotatedPdfUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [extractionStats, setExtractionStats] = useState<{
+    file1?: ExtractionResult["stats"];
+    file2?: ExtractionResult["stats"];
+  }>({});
+  const [processingStep, setProcessingStep] = useState<string>("");
+  const [extractedTexts, setExtractedTexts] = useState<{
+    text1: string;
+    text2: string;
+  } | null>(null);
 
-  const extractTextFromPdf = async (file: File): Promise<string> => {
+  const extractTextViaAPI = async (
+    file1: File,
+    file2: File
+  ): Promise<{ text1: string; text2: string; stats1: any; stats2: any }> => {
+    setProcessingStep("📤 Envoi des PDFs vers le serveur...");
+
+    const formData = new FormData();
+    formData.append("file1", file1);
+    formData.append("file2", file2);
+
+    try {
+      const response = await fetch(`${API_URL}/api/compare`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(
+          errorData.detail || "Erreur lors de l'extraction du texte"
+        );
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error("L'API a retourné une erreur");
+      }
+
+      setExtractionStats({
+        file1: data.file1.stats,
+        file2: data.file2.stats,
+      });
+
+      return {
+        text1: data.file1.text,
+        text2: data.file2.text,
+        stats1: data.file1.stats,
+        stats2: data.file2.stats,
+      };
+    } catch (err) {
+      if (err instanceof Error) {
+        throw new Error(`Erreur API: ${err.message}`);
+      }
+      throw new Error("Erreur de connexion à l'API");
+    }
+  };
+
+  const extractTextLocalFallback = async (file: File): Promise<string> => {
     try {
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
@@ -52,14 +138,254 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
       return fullText;
     } catch (err) {
-      throw new Error("Erreur lors de l'extraction du texte du PDF");
+      throw new Error("Erreur lors de l'extraction locale du texte");
     }
   };
 
+  const escapeHtml = (text: string): string => {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  };
+
+  const highlightWordDifferences = (
+    text1: string,
+    text2: string
+  ): { html1: string; html2: string } => {
+    const wordDiffs = diff.diffWords(text1, text2);
+    let html1 = "";
+    let html2 = "";
+
+    for (const part of wordDiffs) {
+      const escapedValue = escapeHtml(part.value);
+
+      if (part.removed) {
+        html1 += `<span class="removed-word">${escapedValue}</span>`;
+      } else if (part.added) {
+        html2 += `<span class="added-word">${escapedValue}</span>`;
+      } else {
+        html1 += escapedValue;
+        html2 += escapedValue;
+      }
+    }
+
+    return { html1, html2 };
+  };
+
+  const createLineDiff = (text1: string, text2: string): DiffLine[] => {
+    const differences = diff.diffLines(text1, text2);
+    const result: DiffLine[] = [];
+    let index1 = 0;
+    let index2 = 0;
+
+    for (const part of differences) {
+      const lines = part.value.split("\n");
+
+      if (!part.added && !part.removed) {
+        for (let i = 0; i < lines.length; i++) {
+          if (i === lines.length - 1 && !lines[i]) continue;
+          result.push({
+            lineNumber1: index1 + 1,
+            lineNumber2: index2 + 1,
+            text1: lines[i],
+            text2: lines[i],
+            type: "unchanged",
+          });
+          index1++;
+          index2++;
+        }
+      } else if (part.removed) {
+        for (let i = 0; i < lines.length; i++) {
+          if (i === lines.length - 1 && !lines[i]) continue;
+          result.push({
+            lineNumber1: index1 + 1,
+            lineNumber2: -1,
+            text1: lines[i],
+            text2: "",
+            type: "removed",
+          });
+          index1++;
+        }
+      } else if (part.added) {
+        for (let i = 0; i < lines.length; i++) {
+          if (i === lines.length - 1 && !lines[i]) continue;
+          result.push({
+            lineNumber1: -1,
+            lineNumber2: index2 + 1,
+            text1: "",
+            text2: lines[i],
+            type: "added",
+          });
+          index2++;
+        }
+      }
+    }
+
+    return result;
+  };
+
+  const createHtmlDiff = (
+    text1: string,
+    text2: string,
+    filename1: string,
+    filename2: string
+  ): string => {
+    const lineDiffs = createLineDiff(text1, text2);
+
+    return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Comparaison: ${escapeHtml(filename1)} vs ${escapeHtml(
+      filename2
+    )}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Courier New', monospace; font-size: 12px; background: #f5f5f5; padding: 20px; }
+    .header { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .header h1 { font-size: 24px; margin-bottom: 10px; color: #333; }
+    .header .filenames { display: flex; gap: 20px; margin-top: 10px; }
+    .header .filename { padding: 8px 12px; background: #f0f0f0; border-radius: 4px; font-size: 13px; }
+    .legend { background: white; padding: 15px 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; gap: 20px; flex-wrap: wrap; }
+    .legend-item { display: flex; align-items: center; gap: 8px; }
+    .legend-box { width: 20px; height: 20px; border-radius: 3px; }
+    .comparison-container { display: flex; gap: 2px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .document-panel { flex: 1; overflow-x: auto; }
+    .document-header { background: #2c3e50; color: white; padding: 12px 15px; font-weight: bold; position: sticky; top: 0; z-index: 10; }
+    .line { display: flex; min-height: 24px; border-bottom: 1px solid #e0e0e0; transition: background-color 0.2s; }
+    .line:hover { background-color: #f8f9fa !important; }
+    .line-number { width: 50px; padding: 4px 8px; text-align: right; background: #f8f9fa; color: #666; border-right: 1px solid #ddd; user-select: none; flex-shrink: 0; }
+    .line-content { padding: 4px 12px; white-space: pre-wrap; word-break: break-word; flex: 1; }
+    .unchanged { background: white; }
+    .modified { background: #fff9e6; }
+    .added { background: #e6ffe6; }
+    .removed { background: #ffe6e6; }
+    .removed-word { background: #ffcccc; text-decoration: line-through; padding: 2px 4px; border-radius: 3px; }
+    .added-word { background: #ccffcc; font-weight: bold; padding: 2px 4px; border-radius: 3px; }
+    .empty-line { color: #ccc; font-style: italic; }
+    @media print { body { background: white; padding: 0; } .comparison-container { box-shadow: none; } }
+    @media (max-width: 768px) { .comparison-container { flex-direction: column; } .document-panel { width: 100%; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📄 Comparaison de Documents PDF</h1>
+    <div class="filenames">
+      <div class="filename">📌 Document 1: ${escapeHtml(filename1)}</div>
+      <div class="filename">📌 Document 2: ${escapeHtml(filename2)}</div>
+    </div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-box" style="background: #ffe6e6;"></div><span>Texte supprimé</span></div>
+    <div class="legend-item"><div class="legend-box" style="background: #e6ffe6;"></div><span>Texte ajouté</span></div>
+    <div class="legend-item"><div class="legend-box" style="background: #fff9e6;"></div><span>Texte modifié</span></div>
+    <div class="legend-item"><div class="legend-box" style="background: white; border: 1px solid #ddd;"></div><span>Identique</span></div>
+  </div>
+  <div class="comparison-container">
+    <div class="document-panel">
+      <div class="document-header">📄 ${escapeHtml(filename1)}</div>
+      ${lineDiffs
+        .map((line) => {
+          const highlighted =
+            line.type === "modified" && line.text1 && line.text2
+              ? highlightWordDifferences(line.text1, line.text2)
+              : {
+                  html1: escapeHtml(line.text1),
+                  html2: escapeHtml(line.text2),
+                };
+          return `<div class="line ${line.type}">
+          <div class="line-number">${
+            line.lineNumber1 > 0 ? line.lineNumber1 : ""
+          }</div>
+          <div class="line-content ${!line.text1 ? "empty-line" : ""}">${
+            line.text1 ? highlighted.html1 : "(ligne supprimée)"
+          }</div>
+        </div>`;
+        })
+        .join("")}
+    </div>
+    <div class="document-panel">
+      <div class="document-header">📄 ${escapeHtml(filename2)}</div>
+      ${lineDiffs
+        .map((line) => {
+          const highlighted =
+            line.type === "modified" && line.text1 && line.text2
+              ? highlightWordDifferences(line.text1, line.text2)
+              : {
+                  html1: escapeHtml(line.text1),
+                  html2: escapeHtml(line.text2),
+                };
+          return `<div class="line ${line.type}">
+          <div class="line-number">${
+            line.lineNumber2 > 0 ? line.lineNumber2 : ""
+          }</div>
+          <div class="line-content ${!line.text2 ? "empty-line" : ""}">${
+            line.text2 ? highlighted.html2 : "(ligne ajoutée)"
+          }</div>
+        </div>`;
+        })
+        .join("")}
+    </div>
+  </div>
+  <script>
+    const panels = document.querySelectorAll('.document-panel');
+    let isScrolling = false;
+    panels.forEach((panel, index) => {
+      panel.addEventListener('scroll', () => {
+        if (!isScrolling) {
+          isScrolling = true;
+          const otherPanel = panels[1 - index];
+          otherPanel.scrollTop = panel.scrollTop;
+          setTimeout(() => { isScrolling = false; }, 50);
+        }
+      });
+    });
+  </script>
+</body>
+</html>`;
+  };
+
+  const downloadHtmlDiff = () => {
+    if (!extractedTexts || !file1 || !file2) return;
+
+    const htmlContent = createHtmlDiff(
+      extractedTexts.text1,
+      extractedTexts.text2,
+      file1.name,
+      file2.name
+    );
+
+    const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `comparaison_${file1.name.replace(
+      ".pdf",
+      ""
+    )}_vs_${file2.name.replace(".pdf", "")}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const sanitizeTextForWinAnsi = (s: string) =>
+    s.replace(/[\u0080-\uFFFF]/g, (ch) => {
+      if (ch === "➢") return "-";
+      return "?";
+    });
+
   const createDiffPdf = async (text1: string, text2: string): Promise<Blob> => {
+    setProcessingStep("📝 Génération du PDF de différences...");
+
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const page = pdfDoc.addPage([595, 842]); // A4 size
+    const page = pdfDoc.addPage([595, 842]);
 
     const { width, height } = page.getSize();
     const fontSize = 12;
@@ -67,21 +393,11 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     const margin = 50;
     const maxWidth = width - 2 * margin;
 
-    // helper para evitar erro WinAnsi (caracteres fora de encoding)
-    const sanitizeTextForWinAnsi = (s: string) =>
-      s.replace(/[\u0080-\uFFFF]/g, (ch) => {
-        if (ch === "➢") return "-";
-        return "?";
-      });
-
-    // Calculate differences
     const differences = diff.diffLines(text1, text2);
 
     let yPosition = height - margin;
-    let pageCount = 1;
     let currentPage = page;
 
-    // Title
     currentPage.drawText("Comparaison PDF - Différences", {
       x: margin,
       y: yPosition,
@@ -91,7 +407,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     });
     yPosition -= 30;
 
-    // Legend
     currentPage.drawText("Légende:", {
       x: margin,
       y: yPosition,
@@ -119,13 +434,10 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     });
     yPosition -= 30;
 
-    // Process differences
     for (const part of differences) {
       if (yPosition < margin + 50) {
-        // Create new page if needed
         currentPage = pdfDoc.addPage([595, 842]);
         yPosition = height - margin;
-        pageCount++;
       }
 
       const lines = part.value.split("\n").filter((line) => line.trim());
@@ -133,7 +445,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
       for (const line of lines) {
         if (!line.trim()) continue;
 
-        // Word wrap for long lines
         const words = line.split(" ");
         let currentLine = "";
 
@@ -145,10 +456,9 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
           );
 
           if (textWidth > maxWidth && currentLine) {
-            // Draw current line
-            let color = rgb(0, 0, 0); // default black
-            if (part.removed) color = rgb(0.8, 0, 0); // red for removed
-            if (part.added) color = rgb(0, 0.6, 0); // green for added
+            let color = rgb(0, 0, 0);
+            if (part.removed) color = rgb(0.8, 0, 0);
+            if (part.added) color = rgb(0, 0.6, 0);
 
             currentPage.drawText(sanitizeTextForWinAnsi(currentLine), {
               x: margin,
@@ -161,18 +471,15 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
             yPosition -= lineHeight;
             currentLine = word;
 
-            // Check if we need a new page
             if (yPosition < margin + 50) {
               currentPage = pdfDoc.addPage([595, 842]);
               yPosition = height - margin;
-              pageCount++;
             }
           } else {
             currentLine = testLine;
           }
         }
 
-        // Draw remaining text
         if (currentLine) {
           let color = rgb(0, 0, 0);
           if (part.removed) color = rgb(0.8, 0, 0);
@@ -220,7 +527,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
         segments.push({ start, end, kind: modified ? "modified" : "added" });
         pos2 = end;
       } else if (p.removed) {
-        // removed text advances only in t1; do nothing to pos2
       } else {
         pos2 += p.value.length;
       }
@@ -233,7 +539,7 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     end: number;
     pageIndex: number;
     x: number;
-    y: number; // PDF.js y (top baseline)
+    y: number;
     width: number;
     height: number;
   }
@@ -247,7 +553,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     pageWidths: number[];
   }> => {
     const original = await file.arrayBuffer();
-    // Clona o buffer para cada lib evitar "detached ArrayBuffer"
     const bufForPdfJs = original.slice(0);
     const bufForPdfLib = original.slice(0);
 
@@ -259,18 +564,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     const pageHeights: number[] = [];
     const pageWidths: number[] = [];
 
-    // Fallback de OCR quando não houver camada de texto - simplified for Next.js
-    const ocrPageToItems = async (
-      page: any,
-      pageIndex: number,
-      pointsWidth: number,
-      pointsHeight: number
-    ): Promise<{ items: TextItemBox[]; text: string }> => {
-      // Simplified OCR fallback - in a real app you'd use Tesseract.js
-      console.warn("OCR fallback needed but simplified for Next.js demo");
-      return { items: [], text: "" };
-    };
-
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const pageIndex = i - 1;
@@ -281,7 +574,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
       const textContent = await page.getTextContent();
       const raw = textContent.items as any[];
 
-      // viewport para transformar coordenadas de canvas -> pontos
       const viewport = page.getViewport({ scale: 1 });
       const rx = width / viewport.width;
       const ry = height / viewport.height;
@@ -293,25 +585,22 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
           assembled += str + " ";
           const end = assembled.length;
 
-          // aplica transform do viewport
-          const t =
-            (pdfjs as any).Util && (pdfjs as any).Util.transform
-              ? (pdfjs as any).Util.transform(viewport.transform, it.transform)
-              : it.transform;
-          const tx = t ? t[4] : it.x || 0;
-          const ty = t ? t[5] : it.y || 0;
-          const hCanvas = t ? Math.abs(t[3] || 0) : it.height || 10;
+          const transform = it.transform;
+          const tx = transform ? transform[4] : 0;
+          const ty = transform ? transform[5] : 0;
+          const hCanvas = transform
+            ? Math.abs(transform[3] || 0)
+            : it.height || 10;
           const wCanvas =
             typeof it.width === "number"
               ? it.width
-              : Math.abs(t ? t[0] || 0 : 0);
+              : Math.abs(transform ? transform[0] || 0 : 0);
 
           const xPt = tx * rx;
           const yTopPt = ty * ry;
           const hPt = hCanvas * ry;
           const wPt = Math.max(1, wCanvas * rx);
 
-          // converte top-left (x, yTopPt) para bottom-left (x, yBottom)
           const yBottomPt = Math.max(0, height - (yTopPt + hPt));
 
           items.push({
@@ -324,21 +613,6 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
             height: hPt,
           });
         }
-      } else {
-        // OCR fallback - simplified
-        const { items: ocrItems, text } = await ocrPageToItems(
-          page,
-          pageIndex,
-          width,
-          height
-        );
-        for (const it of ocrItems) {
-          items.push({
-            ...it,
-            y: Math.max(0, height - (it.y + it.height)),
-          });
-        }
-        assembled += text;
       }
 
       assembled += "\n\n";
@@ -352,23 +626,22 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
     text2: string,
     fileSecond: File
   ): Promise<Blob> => {
+    setProcessingStep("🖍️ Annotation du PDF avec les différences...");
+
     const segments = computeAddedAndModifiedSegments(text1, text2);
-    // layout and a copy of the second PDF pages
     const layout = await collectSecondTextLayout(fileSecond);
 
-    // Create output doc by loading original second and copying pages to a new doc to keep it identical
     const inBytes = await fileSecond.arrayBuffer();
     const inDoc = await PDFDocument.load(inBytes);
     const outDoc = await PDFDocument.create();
     const srcPages = await outDoc.copyPages(inDoc, inDoc.getPageIndices());
     srcPages.forEach((p) => outDoc.addPage(p));
 
-    // Build highlights per segment by intersecting with text items
     for (const seg of segments) {
       const segStart = seg.start;
       const segEnd = seg.end;
       const color = seg.kind === "modified" ? rgb(1, 1, 0) : rgb(0.9, 0, 0);
-      // find items overlapping
+
       for (const it of layout.items) {
         const overlapStart = Math.max(segStart, it.start);
         const overlapEnd = Math.min(segEnd, it.end);
@@ -406,18 +679,38 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
     setIsProcessing(true);
     setError(null);
+    setProcessingStep("");
 
     try {
-      // Extract text from both PDFs
-      const text1 = await extractTextFromPdf(file1.file);
-      const text2 = await extractTextFromPdf(file2.file);
+      let text1: string;
+      let text2: string;
 
-      // Create diff PDF
+      try {
+        setProcessingStep("🔗 Connexion à l'API Python...");
+        const apiResult = await extractTextViaAPI(file1.file, file2.file);
+        text1 = apiResult.text1;
+        text2 = apiResult.text2;
+        setProcessingStep("✅ Extraction hybride réussie (texte + OCR)");
+      } catch (apiError) {
+        console.warn(
+          "API indisponible, utilisation du fallback local:",
+          apiError
+        );
+        setProcessingStep(
+          "⚠️ API indisponible, extraction locale (sans OCR)..."
+        );
+        text1 = await extractTextLocalFallback(file1.file);
+        text2 = await extractTextLocalFallback(file2.file);
+        setProcessingStep("✅ Extraction locale terminée");
+      }
+
+      // Salvar textos extraídos para HTML
+      setExtractedTexts({ text1, text2 });
+
       const diffBlob = await createDiffPdf(text1, text2);
       const diffUrl = URL.createObjectURL(diffBlob);
       setDiffPdfUrl(diffUrl);
 
-      // Create annotated copy of the second PDF
       const annotatedBlob = await createAnnotatedSecondPdf(
         text1,
         text2,
@@ -425,11 +718,14 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
       );
       const annotatedUrl = URL.createObjectURL(annotatedBlob);
       setAnnotatedPdfUrl(annotatedUrl);
+
+      setProcessingStep("✅ Traitement terminé avec succès!");
       if (onComplete) onComplete();
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Erreur lors du traitement";
       setError(message);
+      setProcessingStep("");
       if (onError) onError(message);
     } finally {
       setIsProcessing(false);
@@ -438,13 +734,10 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
   const downloadDiff = () => {
     if (!diffPdfUrl) return;
-
     const fileName = `differences_${file1?.name.replace(
       ".pdf",
       ""
     )}_vs_${file2?.name.replace(".pdf", "")}.pdf`;
-
-    // Create download link
     const link = document.createElement("a");
     link.href = diffPdfUrl;
     link.download = fileName;
@@ -455,7 +748,7 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
   const downloadAnnotated = () => {
     if (!annotatedPdfUrl) return;
-    const fileName = `annotated_${file2?.name.replace(".pdf", "")}.pdf`;
+    const fileName = `annotated_${file2?.name}`;
     const link = document.createElement("a");
     link.href = annotatedPdfUrl;
     link.download = fileName;
@@ -472,22 +765,36 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
   useEffect(() => {
     return () => {
-      if (diffPdfUrl) {
-        URL.revokeObjectURL(diffPdfUrl);
-      }
-      if (annotatedPdfUrl) {
-        URL.revokeObjectURL(annotatedPdfUrl);
-      }
+      if (diffPdfUrl) URL.revokeObjectURL(diffPdfUrl);
+      if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
     };
   }, [diffPdfUrl, annotatedPdfUrl]);
 
   if (isProcessing) {
     return (
-      <div className="flex items-center justify-center p-6">
+      <div className="flex flex-col items-center justify-center p-6 space-y-4">
+        <Loader2 className="w-12 h-12 animate-spin text-blue-600" />
         <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-blue-600 mx-auto mb-4" />
-          <p className="text-gray-600">Analyse des différences en cours...</p>
+          <p className="text-lg font-semibold text-gray-900 mb-2">
+            Traitement en cours...
+          </p>
+          {processingStep && (
+            <p className="text-sm text-gray-600">{processingStep}</p>
+          )}
         </div>
+        {extractionStats.file1 && (
+          <div className="bg-blue-50 p-4 rounded-lg text-left w-full max-w-md space-y-2 text-sm">
+            <p className="font-semibold text-blue-900">
+              Statistiques d'extraction:
+            </p>
+            <div className="grid grid-cols-2 gap-2 text-gray-700">
+              <div>📄 Pages totales: {extractionStats.file1.total_pages}</div>
+              <div>📝 Texte direct: {extractionStats.file1.text_extracted}</div>
+              <div>🔍 OCR utilisé: {extractionStats.file1.ocr_used}</div>
+              <div>🔀 Hybride: {extractionStats.file1.hybrid}</div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -503,28 +810,58 @@ const DiffProcessor: React.FC<DiffProcessorProps> = ({
 
   if (diffPdfUrl) {
     return (
-      <div className="text-center">
-        <button
-          onClick={downloadDiff}
-          className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center space-x-3 mx-auto hover:scale-105 shadow-lg"
-        >
-          <Download className="w-5 h-5" />
-          <span>Télécharger le fichier de différences</span>
-        </button>
-        {annotatedPdfUrl && (
-          <div className="mt-4">
+      <div className="space-y-4">
+        <div className="flex items-center space-x-3 text-green-600 bg-green-50 p-4 rounded-lg">
+          <CheckCircle className="w-6 h-6 flex-shrink-0" />
+          <div>
+            <p className="font-semibold">Comparaison terminée avec succès!</p>
+            {extractionStats.file1 && (
+              <p className="text-sm text-green-700 mt-1">
+                {extractionStats.file1.ocr_used + extractionStats.file1.hybrid >
+                0
+                  ? `OCR utilisé sur ${
+                      extractionStats.file1.ocr_used +
+                      extractionStats.file1.hybrid
+                    } page(s)`
+                  : "Extraction de texte directe (rapide)"}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <button
+            onClick={downloadHtmlDiff}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center space-x-3 justify-center hover:scale-105 shadow-lg"
+          >
+            <FileText className="w-5 h-5" />
+            <span>Télécharger la comparaison HTML (Recommandé)</span>
+          </button>
+
+          <div className="flex flex-col sm:flex-row gap-3">
             <button
-              onClick={downloadAnnotated}
-              className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center space-x-3 mx-auto hover:scale-105 shadow-lg"
+              onClick={downloadDiff}
+              className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center space-x-3 justify-center hover:scale-105 shadow-lg flex-1"
             >
               <Download className="w-5 h-5" />
-              <span>Télécharger le PDF annoté (copie du 2ᵉ)</span>
+              <span>PDF de différences</span>
             </button>
+
+            {annotatedPdfUrl && (
+              <button
+                onClick={downloadAnnotated}
+                className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center space-x-3 justify-center hover:scale-105 shadow-lg flex-1"
+              >
+                <Download className="w-5 h-5" />
+                <span>PDF annoté</span>
+              </button>
+            )}
           </div>
-        )}
-        <p className="text-sm text-gray-600 mt-3">
-          Le fichier PDF contient les différences entre vos documents avec la
-          légende colorée
+        </div>
+
+        <p className="text-sm text-gray-600 text-center">
+          💡 Le fichier HTML offre une meilleure visualisation côte à côte avec
+          mise en évidence des différences
         </p>
       </div>
     );
