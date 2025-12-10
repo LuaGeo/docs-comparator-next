@@ -19,12 +19,14 @@ Application web de comparaison de documents PDF qui analyse les différences ent
 ## Technologies
 
 **Frontend :**
+
 - Next.js 15.5.4 / React 19 / TypeScript
 - Tailwind CSS
 - PDF.js (rendu et extraction)
 - PDF-lib (manipulation PDF)
 
 **Backend (optionnel) :**
+
 - FastAPI (Python)
 - PyMuPDF
 - Google Cloud Vision (OCR)
@@ -75,12 +77,14 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 ### Développement
 
 **Terminal 1 - Frontend :**
+
 ```bash
-npm run dev
+npm run dev (ou yarn dev)
 # Accessible sur http://localhost:3000
 ```
 
 **Terminal 2 - Backend (optionnel) :**
+
 ```bash
 cd python-backend
 # Activer venv
@@ -117,12 +121,12 @@ docs-comparator-next/
 
 ## API Backend
 
-| Endpoint | Méthode | Description |
-|----------|---------|-------------|
-| `/` | GET | Info API |
-| `/api/extract` | POST | Extraire texte d'un PDF |
-| `/api/compare` | POST | Comparer deux PDFs |
-| `/health` | GET | Health check |
+| Endpoint       | Méthode | Description             |
+| -------------- | ------- | ----------------------- |
+| `/`            | GET     | Info API                |
+| `/api/extract` | POST    | Extraire texte d'un PDF |
+| `/api/compare` | POST    | Comparer deux PDFs      |
+| `/health`      | GET     | Health check            |
 
 ### Exemple - Comparer deux PDFs
 
@@ -141,13 +145,13 @@ curl -X POST http://localhost:8000/api/compare \
 
 ## Scripts npm
 
-| Script | Description |
-|--------|-------------|
-| `npm run dev` | Serveur de développement (Turbopack) |
-| `npm run build` | Build de production |
-| `npm start` | Serveur de production |
-| `npm run lint` | Linter ESLint |
-| `npm run copy-assets` | Copie le worker PDF.js |
+| Script                | Description                          |
+| --------------------- | ------------------------------------ |
+| `npm run dev`         | Serveur de développement (Turbopack) |
+| `npm run build`       | Build de production                  |
+| `npm start`           | Serveur de production                |
+| `npm run lint`        | Linter ESLint                        |
+| `npm run copy-assets` | Copie le worker PDF.js               |
 
 ## Limitations
 
