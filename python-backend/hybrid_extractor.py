@@ -1,11 +1,10 @@
 import fitz  # PyMuPDF
 from google.cloud import vision
-import io
-from PIL import Image
-import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 class HybridPDFExtractor:
     """
@@ -13,7 +12,11 @@ class HybridPDFExtractor:
     """
     
     def __init__(self, vision_client=None):
-        self.vision_client = vision_client or vision.ImageAnnotatorClient()
+        try:
+            self.vision_client = vision_client or vision.ImageAnnotatorClient()
+        except Exception as e:
+            print(f"⚠️ Vision API non disponible: {e}")
+            self.vision_client = None
     
     def has_extractable_text(self, page):
         """
@@ -39,29 +42,37 @@ class HybridPDFExtractor:
         """
         Extrait le texte en utilisant l'OCR (pour les pages avec images/tableaux)
         """
-        # Convertir la page en image à haute résolution
-        mat = fitz.Matrix(3, 3)  # Zoom 3x
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("png")
-        
-        # OCR avec Google Cloud Vision
-        image = vision.Image(content=img_bytes)
-        response = self.vision_client.document_text_detection(image=image)
-        
-        if response.error.message:
-            raise Exception(f'Erreur OCR: {response.error.message}')
-        
-        # Extraire le texte
-        text = response.full_text_annotation.text if response.full_text_annotation else ""
-        
-        return text
+        if not self.vision_client:
+            return "[OCR non disponible - Vision API non configurée]"
     
-    def extract_from_pdf(self, pdf_path, output_path=None):
+        try:
+            mat = fitz.Matrix(3, 3)
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes("png")
+            
+            image = vision.Image(content=img_bytes)
+            response = self.vision_client.document_text_detection(image=image)
+            
+            if response.error.message:
+                raise Exception(f'Erreur OCR: {response.error.message}')
+            
+            return response.full_text_annotation.text if response.full_text_annotation else ""
+        
+        except Exception as e:
+            return f"[Erreur OCR page {page_num + 1}: {str(e)}]"
+        
+    def extract_from_pdf(self, pdf_input, output_path=None):
         """
         Traite le PDF page par page en décidant de la meilleure stratégie
+        Accepte soit un chemin (str), soit des bytes
         """
-        doc = fitz.open(pdf_path)
+        # Adapter pour accepter bytes OU chemin
+        if isinstance(pdf_input, bytes):
+            doc = fitz.open(stream=pdf_input, filetype="pdf")
+        else:
+            doc = fitz.open(pdf_input)
         
+        # IMPORTANT: Ce code doit être AU MÊME NIVEAU que le if/else ci-dessus
         results = []
         stats = {
             'total_pages': len(doc),
@@ -155,8 +166,6 @@ class HybridPDFExtractor:
         """
         Combine le texte direct avec le texte de l'OCR de manière intelligente
         """
-        # Stratégie : garder le texte direct et ajouter le contenu de l'OCR qui n'est pas présent
-        
         # Diviser en lignes
         direct_lines = set(line.strip() for line in direct_text.split('\n') if line.strip())
         ocr_lines = [line.strip() for line in ocr_text.split('\n') if line.strip()]
@@ -164,14 +173,13 @@ class HybridPDFExtractor:
         # Ajouter les lignes de l'OCR qui ne sont pas dans le texte direct
         additional_lines = []
         for ocr_line in ocr_lines:
-            # Vérifier si la ligne OCR existe déjà dans le texte direct
             if not any(ocr_line in direct_line or direct_line in ocr_line 
                     for direct_line in direct_lines):
                 additional_lines.append(ocr_line)
         
-        # Combiner
+        # Combiner SANS marqueur [CONTENU DES IMAGES/TABLEAUX]
         if additional_lines:
-            combined = direct_text + "\n\n[CONTENU DES IMAGES/TABLEAUX]\n" + "\n".join(additional_lines)
+            combined = direct_text + "\n\n" + "\n".join(additional_lines)
         else:
             combined = direct_text
         
@@ -179,20 +187,17 @@ class HybridPDFExtractor:
     
     def assemble_full_text(self, results):
         """
-        Assemble le texte complet en maintenant l'ordre des pages
+        Assemble le texte SANS séparateurs de page pour une meilleure comparaison
+        Identique au comportement de Streamlit
         """
         full_text_parts = []
         
         for page_data in results:
-            page_num = page_data['page_number']
             text = page_data['text'].strip()
-            
             if text:
-                # Ajouter un séparateur de page
-                separator = f"\n\n{'='*60}\n[PAGE {page_num}]\n{'='*60}\n\n"
-                full_text_parts.append(separator + text)
+                full_text_parts.append(text)
         
-        return "\n".join(full_text_parts)
+        return "\n\n".join(full_text_parts)
 
 
 # ============================================
@@ -200,14 +205,10 @@ class HybridPDFExtractor:
 # ============================================
 
 def main():
-    # Configurer Google Cloud Vision
-    # Assurez-vous d'avoir la variable d'environnement GOOGLE_APPLICATION_CREDENTIALS configurée
-    # export GOOGLE_APPLICATION_CREDENTIALS="chemin/vers/credentials.json"
-    
     extractor = HybridPDFExtractor()
     
     # Traiter le PDF
-    pdf_path = "C:\\Users\\DEOLIVEIRALuana\\dev\\projects\\diff-pdf\\img\\Contrat CP_CG SAFRAN 2024 Anciens salariés Gtie Resp V_7EL.pdf"
+    pdf_path = "test.pdf"
     output_path = "texte_extrait_complet.txt"
     
     full_text, page_results, stats = extractor.extract_from_pdf(
@@ -215,24 +216,11 @@ def main():
         output_path
     )
     
-    # Voir les résultats
     print("\n" + "="*60)
     print("📝 PREMIERS 500 CARACTÈRES DU TEXTE EXTRAIT")
     print("="*60)
     print(full_text[:500])
     print("...")
-    
-    # Sauvegarder aussi en JSON (avec métadonnées)
-    import json
-    json_output = "texte_extrait_metadata.json"
-    with open(json_output, 'w', encoding='utf-8') as f:
-        json.dump({
-            'stats': stats,
-            'pages': page_results,
-            'full_text': full_text
-        }, f, ensure_ascii=False, indent=2)
-    
-    print(f"\n✓ Métadonnées sauvegardées dans : {json_output}")
 
 
 if __name__ == "__main__":
