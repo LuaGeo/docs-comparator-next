@@ -21,7 +21,7 @@ dotenv==0.9.9
 easyocr==1.7.2
 einops==0.8.1
 et_xmlfile==2.0.0
-filelock==3.19.1
+filelock==3.20.1
 fsspec==2025.9.0
 ftfy==6.3.1
 future==1.0.0
